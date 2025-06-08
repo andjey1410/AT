@@ -60,14 +60,14 @@ type ContinuousResult struct {
 
 // AnalysisResult содержит полные результаты анализа
 type AnalysisResult struct {
-	TotalRecords  int             `json:"totalRecords"`
-	StartDate     time.Time       `json:"startDate"`
-	EndDate       time.Time       `json:"endDate"`
-	Days          []DayRecord     `json:"days"`
-	Weeks         []WeekRecord    `json:"weeks"`
-	Months        []MonthRecord   `json:"months"`
-	Periods       PeriodResults   `json:"periods"`
-	Continuous    ContinuousResult `json:"continuous"`
+	TotalRecords int              `json:"totalRecords"`
+	StartDate    time.Time        `json:"startDate"`
+	EndDate      time.Time        `json:"endDate"`
+	Days         []DayRecord      `json:"days"`
+	Weeks        []WeekRecord     `json:"weeks"`
+	Months       []MonthRecord    `json:"months"`
+	Periods      PeriodResults    `json:"periods"`
+	Continuous   ContinuousResult `json:"continuous"`
 }
 
 // DefaultPeriodConfig возвращает конфигурацию по умолчанию
@@ -85,10 +85,13 @@ func AnalyzeTimestamps(timestamps []int64, config PeriodConfig) (*AnalysisResult
 	if len(timestamps) == 0 {
 		return nil, errors.New("no timestamps provided")
 	}
-	
+
 	// Валидация конфигурации
-	if config.MinPeriod <= 0 || config.MaxPeriod <= 0 {
-		return nil, errors.New("periods must be positive values")
+	if config.MinPeriod <= 0 {
+		return nil, errors.New("minPeriod must be positive")
+	}
+	if config.MaxPeriod <= 0 {
+		return nil, errors.New("maxPeriod must be positive")
 	}
 	if config.MinPeriod >= config.MaxPeriod {
 		return nil, errors.New("minPeriod must be less than maxPeriod")
@@ -127,14 +130,14 @@ func AnalyzeTimestamps(timestamps []int64, config PeriodConfig) (*AnalysisResult
 
 	// Формирование результата
 	result := &AnalysisResult{
-		TotalRecords:  len(times),
-		StartDate:     startDate,
-		EndDate:       endDate,
-		Days:          days,
-		Weeks:         weeks,
-		Months:        months,
-		Periods:       periods,
-		Continuous:    continuous,
+		TotalRecords: len(times),
+		StartDate:    startDate,
+		EndDate:      endDate,
+		Days:         days,
+		Weeks:        weeks,
+		Months:       months,
+		Periods:      periods,
+		Continuous:   continuous,
 	}
 
 	return result, nil
@@ -201,51 +204,18 @@ func (pd *periodDetector) computePeriodogram(times []float64) ([]float64, []floa
 
 // computePower вычисляет мощность для заданной частоты
 func (pd *periodDetector) computePower(times []float64, freq float64) float64 {
-	tau := pd.computeTau(times, freq)
-
-	var sumCos, sumSin, sumCosSq, sumSinSq float64
 	omega := 2 * math.Pi * freq
+	N := float64(len(times))
 
+	var sumCos, sumSin float64
 	for _, t := range times {
-		angle := omega * (t - tau)
-		c := math.Cos(angle)
-		s := math.Sin(angle)
-
-		sumCos += c
-		sumSin += s
-		sumCosSq += c * c
-		sumSinSq += s * s
+		sumCos += math.Cos(omega * t)
+		sumSin += math.Sin(omega * t)
 	}
 
-	// Защита от деления на ноль
-	if sumCosSq < 1e-10 || sumSinSq < 1e-10 {
-		return 0
-	}
-
-	return (sumCos*sumCos/sumCosSq + sumSin*sumSin/sumSinSq) / 2
+	return (sumCos*sumCos + sumSin*sumSin) / N
 }
 
-// computeTau вычисляет оптимальный сдвиг фазы
-func (pd *periodDetector) computeTau(times []float64, freq float64) float64 {
-	var sumSin2, sumCos2 float64
-	omega := 2 * math.Pi * freq
-	twoOmega := 2 * omega
-
-	for _, t := range times {
-		angle := twoOmega * t
-		sumSin2 += math.Sin(angle)
-		sumCos2 += math.Cos(angle)
-	}
-
-	// Защита от деления на ноль
-	if math.Abs(sumCos2) < 1e-10 && math.Abs(sumSin2) < 1e-10 {
-		return 0
-	}
-
-	return math.Atan2(sumSin2, sumCos2) / (2 * omega)
-}
-
-// findSignificantPeaks находит значимые пики в периодограмме
 func (pd *periodDetector) findSignificantPeaks(freqs, powers []float64) []PeriodResult {
 	// Находим все локальные максимумы
 	peaks := findLocalPeaks(powers)
@@ -261,15 +231,21 @@ func (pd *periodDetector) findSignificantPeaks(freqs, powers []float64) []Period
 		peaks = peaks[:pd.config.NumPeriods]
 	}
 
-	// Находим максимальную мощность для нормализации
-	maxPower := findMaxPower(powers)
+	// Вычисляем общую мощность для нормализации
+	totalPower := 0.0
+	for _, p := range powers {
+		totalPower += p
+	}
+	if totalPower < 1e-10 {
+		totalPower = 1e-10
+	}
 
 	// Формируем результаты
 	results := make([]PeriodResult, len(peaks))
 	for i, idx := range peaks {
 		period := 1 / freqs[idx]
 		power := powers[idx]
-		significance := power / maxPower * 100
+		significance := power / totalPower * 100
 
 		results[i] = PeriodResult{
 			Period:       period,
@@ -559,39 +535,47 @@ func aggregateByDay(times []time.Time) []DayRecord {
 
 // aggregateByWeek агрегирует данные по неделям
 func aggregateByWeek(times []time.Time) []WeekRecord {
-	weekMap := make(map[time.Time]int)
+	weekMap := make(map[string]int)
+	weekStarts := make(map[string]time.Time)
 
 	for _, t := range times {
 		year, week := t.ISOWeek()
-		weekStart := firstDayOfISOWeek(year, week, t.Location())
-		weekMap[weekStart]++
-	}
+		key := fmt.Sprintf("%d-W%02d", year, week)
 
-	if len(weekMap) == 0 {
-		return nil
-	}
-
-	// Определяем временной диапазон
-	var minWeek, maxWeek time.Time
-	for week := range weekMap {
-		if minWeek.IsZero() || week.Before(minWeek) {
-			minWeek = week
+		// Вычисляем начало недели (понедельник)
+		weekday := int(t.Weekday())
+		if weekday == 0 {
+			weekday = 7 // Воскресенье -> 7
 		}
-		if maxWeek.IsZero() || week.After(maxWeek) {
-			maxWeek = week
+		daysToMonday := weekday - 1
+		weekStart := t.AddDate(0, 0, -daysToMonday).Truncate(24 * time.Hour)
+
+		if _, exists := weekStarts[key]; !exists {
+			weekStarts[key] = weekStart
 		}
+		weekMap[key]++
 	}
 
-	// Генерируем полный ряд
+	// Собираем уникальные начала недель
+	var weeks []time.Time
+	for _, start := range weekStarts {
+		weeks = append(weeks, start)
+	}
+
+	// Сортируем недели
+	sort.Slice(weeks, func(i, j int) bool {
+		return weeks[i].Before(weeks[j])
+	})
+
+	// Формируем результат
 	var result []WeekRecord
-	current := minWeek
-	for !current.After(maxWeek) {
-		count := weekMap[current]
+	for _, weekStart := range weeks {
+		year, week := weekStart.ISOWeek()
+		key := fmt.Sprintf("%d-W%02d", year, week)
 		result = append(result, WeekRecord{
-			Week:  current,
-			Count: count,
+			Week:  weekStart,
+			Count: weekMap[key],
 		})
-		current = current.AddDate(0, 0, 7)
 	}
 
 	return result
@@ -637,14 +621,16 @@ func aggregateByMonth(times []time.Time) []MonthRecord {
 
 // firstDayOfISOWeek возвращает первый день недели по ISO стандарту
 func firstDayOfISOWeek(year, week int, loc *time.Location) time.Time {
-	date := time.Date(year, 0, 0, 0, 0, 0, 0, loc)
-	for date.Weekday() != time.Monday {
-		date = date.AddDate(0, 0, -1)
+	// Создаем дату для 4 января, которое всегда находится в 1 неделе
+	date := time.Date(year, time.January, 4, 0, 0, 0, 0, loc)
+
+	// Находим понедельник недели, содержащей 4 января
+	offset := int(time.Monday - date.Weekday())
+	if offset > 0 {
+		offset = -6
 	}
-	_, isoWeek := date.ISOWeek()
-	for isoWeek < week {
-		date = date.AddDate(0, 0, 7)
-		_, isoWeek = date.ISOWeek()
-	}
-	return date
+	date = date.AddDate(0, 0, offset)
+
+	// Переходим к нужной неделе
+	return date.AddDate(0, 0, (week-1)*7)
 }
